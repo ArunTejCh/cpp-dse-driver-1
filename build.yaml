@@ -1,0 +1,98 @@
+schedules:
+  adhoc:
+    schedule: adhoc
+    branches:
+      include: [master] 
+architecture:
+  - x64
+os:
+  - ubuntu/trusty64
+  - ubuntu/xenial64
+  - centos/6-64
+  - centos/7-64
+build:
+  - script: |
+      echo "Running packaging job"
+package:
+  include: # list of files and glob paths to include in the artifact, relative to the current working directory
+    - packaging/build/*.deb
+    - packaging/build/RPMS/x86_64/*.rpm
+    - packaging/packages/*.deb
+    - packaging/packages/*.rpm
+release:
+    after:
+      each:
+        - script: |
+            LIBUV_VERSION=1.13.1
+            DEPENDENCY_LIST="git debhelper devscripts liblist-moreutils-perl xml2 pkg-config libgmp-dev libpcre3-dev g++ make cmake libssl-dev openssl dh-exec"
+
+            TOKENS=($(echo ${OS_VERSION} | tr "/" " "))
+            DISTRO=${TOKENS[0]}
+            RELEASE=${TOKENS[1]}
+
+            if [ "${DISTRO}" = "ubuntu" ]; then
+              NAME=$(echo ${RELEASE%??})
+              ARCHITECTURE=${RELEASE:-2}
+              if [ "${NAME}" = "trusty" ]; then
+                RELEASE=14.04
+              elif [ "${NAME}" = "xenial" ]; then
+                RELEASE=16.04
+              else
+                printf "Unsupported Ubuntu Version: %s\n" ${rel}
+                exit 1
+              fi
+            elif [ "${DISTRO}" = "centos" ]; then
+              TOKENS=($(echo ${RELEASE} | tr "-" " "))
+              NAME=${DISTRO}
+              RELEASE=${TOKENS[0]}
+              ARCHITECTURE=${TOKENS[1]}
+            else
+              printf "Unsupported OS: %s\n" ${OS_VERSION}
+              exit 1
+            fi
+
+            pushd packaging
+            
+            mkdir packages
+
+            # Build libuv, install, and copy to "packages"
+            echo "Building libuv Packages [${LIBUV_VERSION}] ...\n"
+            git clone --depth 1 https://github.com/mpenick/libuv-packaging.git libuv-packaging
+            
+            pushd libuv-packaging
+            if [ "${DISTRO}" = "ubuntu" ]; then
+              sudo apt-get update  
+              sudo apt-get install -y $DEPENDENCY_LIST
+              ./build_deb.sh ${LIBUV_VERSION}
+              pushd build
+              sudo dpkg -i libuv*.deb
+              cp libuv*.deb ../../packages
+              popd
+            elif [ "${DISTRO}" = "centos" ]; then
+              sudo yum install -y $DEPENDENCY_LIST
+              ./build_rpm.sh ${LIBUV_VERSION}
+              pushd build/RPMS/x86_64/
+              sudo rpm -i libuv-*.rpm
+              cp libuv*.rpm ../../../../packages
+              popd
+            fi
+            popd
+
+            # Build, package and upload DataStax C/C++ DSE driver
+            echo "Building DataStax C/C++ DSE driver ..."
+            if [ "${DISTRO}" = "ubuntu" ]; then
+              ./build_deb.sh
+              pushd build/
+              curl -$ARTIFACTORY_CREDS -T "{$(echo *.deb | tr ' ' ',')}" "https://datastax.jfrog.io/datastax/cpp-dse-driver/datastax/builds/{$BUILD_NUMBER}/$DISTRO/$RELEASE/dse/v$version/"
+              popd
+            elif [ "${DISTRO}" = "centos" ]; then 
+              ./build_rpm.sh
+              pushd build/RPMS/x86_64
+              curl -$ARTIFACTORY_CREDS -T "{$(echo *.rpm | tr ' ' ',')}" "https://datastax.jfrog.io/datastax/cpp-dse-driver/datastax/builds/{$BUILD_NUMBER}/$DISTRO/$RELEASE/dse/v$version/"
+              popd
+            fi
+
+            # Uploading libuv packages
+            pushd packages/
+            curl -$ARTIFACTORY_CREDS -T "{$(echo libuv* | tr ' ' ',')}" "https://datastax.jfrog.io/datastax/cpp-dse-driver/datastax/builds/{$BUILD_NUMBER}/$DISTRO/$RELEASE/dependencies/libuv/v$LIBUV_VERSION/"
+            popd
